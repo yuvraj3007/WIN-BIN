@@ -1,10 +1,10 @@
-
 'use server';
 
-import fs from 'fs/promises';
-import path from 'path';
+import { kv } from '@vercel/kv';
 
-// Define the structure of a Bottle
+// --- Data Structures ---
+// These interfaces remain the same as they define the shape of our data.
+
 export interface Bottle {
   id: string;
   type: string;
@@ -12,7 +12,6 @@ export interface Bottle {
   timestamp: number;
 }
 
-// Define the structure for a user's data
 export interface UserData {
   name: string;
   mobile: string;
@@ -20,110 +19,138 @@ export interface UserData {
   ecoCoins: number;
 }
 
-// Define the structure of the entire data store (a dictionary of users)
-type UserStore = Record<string, UserData>;
-
-const MAX_ACCOUNTS = 100;
-// Use path.join to create a platform-independent file path
-// process.cwd() points to the root of the Next.js project
-const dataFilePath = path.join(process.cwd(), 'user-data.json');
-
-// --- Helper Functions to Read/Write from the JSON file ---
-
+// --- Helper Function to create a consistent key for the database ---
 /**
- * Reads the entire user store from the JSON file.
- * If the file doesn't exist, it returns an empty object.
+ * Creates a standardized key for storing and retrieving user data from KV.
+ * @param mobile The user's mobile number.
+ * @returns A string in the format "user:[mobile]".
  */
-async function readStore(): Promise<UserStore> {
-  try {
-    const data = await fs.readFile(dataFilePath, 'utf-8');
-    return JSON.parse(data);
-  } catch (error: any) {
-    // If the file doesn't exist (ENOENT), it's not an error, just return empty.
-    if (error.code === 'ENOENT') {
-      return {};
-    }
-    // For any other errors, log them.
-    console.error('Failed to read user store:', error);
-    return {};
-  }
+function getUserKey(mobile: string): string {
+  return `user:${mobile}`;
 }
 
-/**
- * Writes the entire user store to the JSON file.
- */
-async function writeStore(store: UserStore): Promise<boolean> {
-  try {
-    // Use JSON.stringify with indentation for readability
-    await fs.writeFile(dataFilePath, JSON.stringify(store, null, 2), 'utf-8');
-    return true;
-  } catch (error) {
-    console.error('Failed to write user store:', error);
-    return false;
-  }
-}
 
-// --- Public API Functions for User Management ---
+// --- Public API Functions for User Management (Refactored for Vercel KV) ---
 
 /**
- * Retrieves a user's data from the store.
+ * Retrieves a user's data from the Vercel KV store.
  * @param mobile The user's mobile number (acts as a unique ID).
  * @returns The user's data or null if not found.
  */
 export async function getUser(mobile: string): Promise<UserData | null> {
-  const store = await readStore();
-  return store[mobile] || null;
+  try {
+    const userKey = getUserKey(mobile);
+    // Directly get the data for a single user using their key.
+    // This is much more efficient than reading an entire file.
+    const userData = await kv.get<UserData>(userKey);
+    return userData;
+  } catch (error) {
+    console.error(`Failed to get user ${mobile}:`, error);
+    return null;
+  }
 }
 
 /**
- * Creates a new user and adds them to the store.
+ * Creates a new user and adds them to the Vercel KV store.
  * @param name The user's name.
  * @param mobile The user's mobile number.
- * @returns The newly created user's data or null if the store is full.
+ * @returns The newly created user's data or null if the user already exists.
  */
 export async function createUser(name: string, mobile: string): Promise<UserData | null> {
-  const store = await readStore();
+  try {
+    const userKey = getUserKey(mobile);
 
-  if (Object.keys(store).length >= MAX_ACCOUNTS) {
-    console.warn('User store is full. Cannot create new user.');
-    return null; // Indicate that the store is full
+    // First, check if the user already exists to avoid overwriting them.
+    const existingUser = await kv.get(userKey);
+    if (existingUser) {
+      console.warn(`User with mobile ${mobile} already exists.`);
+      // Return the existing user data instead of creating a new one.
+      return existingUser as UserData;
+    }
+
+    const newUser: UserData = {
+      name,
+      mobile,
+      bottles: [],
+      ecoCoins: 0,
+    };
+
+    // Use kv.set() to save the new user object to the database.
+    await kv.set(userKey, newUser);
+
+    return newUser;
+  } catch (error) {
+    console.error(`Failed to create user ${mobile}:`, error);
+    return null;
   }
-
-  if (store[mobile]) {
-    // This case should ideally be handled by the calling logic, but we can log it.
-    console.warn(`User with mobile ${mobile} already exists.`);
-    return store[mobile];
-  }
-
-  const newUser: UserData = {
-    name,
-    mobile,
-    bottles: [],
-    ecoCoins: 0,
-  };
-
-  store[mobile] = newUser;
-  await writeStore(store);
-
-  return newUser;
 }
 
 /**
- * Updates an existing user's data.
+ * Updates an existing user's data in the Vercel KV store.
  * @param mobile The mobile number of the user to update.
  * @param updates A partial object of the user's data to update.
- * @returns True if the update was successful, false otherwise.
+ * @returns The updated user data, or null if the user was not found.
  */
-export async function updateUser(mobile: string, updates: Partial<UserData>): Promise<boolean> {
-  const store = await readStore();
+export async function updateUser(mobile: string, updates: Partial<UserData>): Promise<UserData | null> {
+  try {
+    const userKey = getUserKey(mobile);
 
-  if (!store[mobile]) {
-    console.error(`User with mobile ${mobile} not found for update.`);
-    return false;
+    // 1. GET the current user data from the database.
+    const currentUserData = await kv.get<UserData>(userKey);
+
+    if (!currentUserData) {
+      console.error(`User with mobile ${mobile} not found for update.`);
+      return null;
+    }
+
+    // 2. MERGE the existing data with the new updates in memory.
+    const updatedUserData: UserData = { ...currentUserData, ...updates };
+    
+    // 3. SET the newly merged object back into the database, overwriting the old one.
+    await kv.set(userKey, updatedUserData);
+
+    return updatedUserData;
+  } catch (error) {
+    console.error(`Failed to update user ${mobile}:`, error);
+    return null;
   }
+}
 
-  // Merge the existing data with the new updates
-  store[mobile] = { ...store[mobile], ...updates };
-  
-  return await writeStore(store);
+/**
+ * A specific update function to add a bottle to a user's list.
+ * This is a good practice to ensure data integrity.
+ * @param mobile The mobile number of the user.
+ * @param newBottle The new bottle object to add.
+ * @returns The fully updated user data, or null on failure.
+ */
+export async function addBottleToUser(mobile: string, newBottle: Bottle): Promise<UserData | null> {
+    try {
+        const userKey = getUserKey(mobile);
+
+        // 1. GET the current user
+        const currentUserData = await kv.get<UserData>(userKey);
+        if (!currentUserData) {
+            console.error(`User with mobile ${mobile} not found to add bottle.`);
+            return null;
+        }
+
+        // 2. MODIFY the data: push the new bottle and update ecoCoins
+        const updatedBottles = [...currentUserData.bottles, newBottle];
+        const updatedEcoCoins = currentUserData.ecoCoins + 10; // Example: Add 10 coins per bottle
+
+        const updatedUserData: UserData = {
+            ...currentUserData,
+            bottles: updatedBottles,
+            ecoCoins: updatedEcoCoins,
+        };
+
+        // 3. SET the new state back to the database
+        await kv.set(userKey, updatedUserData);
+
+        return updatedUserData;
+
+    } catch (error) {
+        console.error(`Failed to add bottle for user ${mobile}:`, error);
+        return null;
+    }
 }
