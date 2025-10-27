@@ -1,4 +1,3 @@
-
 "use client";
 
 import type { ReactNode } from "react";
@@ -99,7 +98,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
         if (!newUser) {
              toast({
                 title: "Registration Failed",
-                description: "The platform has reached its maximum number of accounts.",
+                description: "An error occurred while creating your account.",
                 variant: "destructive",
             });
             return { success: false, isNewUser: false };
